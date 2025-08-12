@@ -3,17 +3,15 @@ Chains for SQL query generation, response formatting, and graph code generation.
 """
 
 from langchain.chains.llm import LLMChain
-from langchain.chains.sequential import SimpleSequentialChain
-
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema import BaseOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI
-from src.database import get_db
-from src.config import LLM_MODEL, OPENROUTER_API_KEY, OPENROUTER_API_BASE
 from functools import lru_cache
 
 import psycopg
 from langchain_openai import OpenAI
+from src.database import get_db
+from src.config import LLM_MODEL, OPENROUTER_API_KEY, OPENROUTER_API_BASE
+
 
 # Initialize LLM with OpenRouter API key and base
 llm = OpenAI(
@@ -46,7 +44,7 @@ def run_query(query):
         elif isinstance(db, str):
             conn_str = db
         else:
-            raise ValueError("Le format de la base de données 'db' n'est pas reconnu")
+            raise ValueError("Database format 'db' is not recognized")
 
         with psycopg.connect(conn_str) as conn:
             with conn.cursor() as cur:
@@ -59,7 +57,7 @@ def get_schema(_):
     """Get database schema with caching."""
     return db.get_table_info()
 
-# SQL generation chain
+# SQL generation prompt and chain
 sql_template = """Based on the table schema below, write a SQL query that would answer the user's question:
 {schema}
 
@@ -69,7 +67,7 @@ sql_prompt = ChatPromptTemplate.from_template(sql_template)
 
 sql_chain = LLMChain(llm=llm, prompt=sql_prompt, output_parser=StrOutputParser())
 
-# Response generation chain
+# Response generation prompt and chain
 response_template = """Based on the table schema below, question, SQL query, and SQL response, write a natural language response:
 {schema}
 
@@ -77,6 +75,24 @@ Question: {question}
 SQL Query: {query}
 SQL Response: {response}"""
 response_prompt = ChatPromptTemplate.from_template(response_template)
+
+full_response_chain = LLMChain(llm=llm, prompt=response_prompt, output_key="response")
+
+# Graph code generation prompt and chain
+graph_code_template = """Given the user's question and the SQL query, generate python matplotlib code that creates a relevant graph.
+
+Question: {question}
+SQL Query: {sql_query}
+
+Python matplotlib code:"""
+
+graph_code_prompt = ChatPromptTemplate.from_template(graph_code_template)
+
+graph_code_chain = LLMChain(
+    llm=llm,
+    prompt=graph_code_prompt,
+    output_parser=StrOutputParser()
+)
 
 def response_run(inputs):
     schema = inputs["schema"]
@@ -93,8 +109,6 @@ def response_run(inputs):
     }
     return full_response_chain.run(formatted_input)
 
-full_response_chain = LLMChain(llm=llm, prompt=response_prompt, output_key="response")
-
 class FullChain(LLMChain):
     """Custom chain to handle SQL generation and response."""
 
@@ -102,6 +116,7 @@ class FullChain(LLMChain):
         super().__init__(llm=llm, prompt=sql_prompt, output_key="query")
 
     def _call(self, inputs):
+        # inputs must contain "question" and "schema"
         query = super()._call(inputs)
         response = run_query(query)
         formatted_input = {
@@ -123,18 +138,51 @@ class FullChain(LLMChain):
 
 full_chain = FullChain()
 
-# Graph code generation chain (returns code string)
-graph_code_template = """Based on the user's question and SQL results, generate Python code using Matplotlib to create the best graph type (e.g., bar for categorical counts, pie for proportions, line for trends, scatter for correlations). Include:
-- Imports (matplotlib.pyplot as plt, pandas as pd).
-- Use SQL results directly.
-- Save figure to buffer (no plt.show()).
-- Set titles, labels, and legend.
-- Optionally use seaborn (import as sns) for enhanced visuals if appropriate.
+# Updated run_full_chain function that accepts both question and schema
+def run_full_chain(inputs):
+    """
+    inputs should be a dict containing keys:
+    - 'question': the user's natural language question
+    - 'schema': the database schema string
+    """
+    try:
+        # Pass both question and schema to full_chain
+        result = full_chain.invoke(inputs)
+        return result["output"]
+    except Exception as e:
+        return f"Error: {str(e)}"
+class FullChain(LLMChain):
+    """Custom chain to handle SQL generation and response."""
 
-Question: {question}
-SQL Results: {sql_results}
+    def __init__(self):
+        super().__init__(llm=llm, prompt=sql_prompt, output_key="query")
 
-Generated Code:"""
-graph_code_prompt = ChatPromptTemplate.from_template(graph_code_template)
+    def _call(self, inputs):
+        print("Generating SQL query...")
+        query = super()._call(inputs)  # This calls the parent class _call, which runs LLM on prompt
+        print(f"SQL query generated: {query}")
 
-graph_code_chain = LLMChain(llm=llm, prompt=graph_code_prompt, output_parser=StrOutputParser())
+        print("Running SQL query...")
+        response = run_query(query)
+        print(f"SQL query response: {response}")
+
+        formatted_input = {
+            "schema": inputs["schema"],
+            "question": inputs["question"],
+            "query": query,
+            "response": str(response),
+        }
+
+        print("Generating final answer...")
+        answer = full_response_chain.run(formatted_input)
+        print(f"Final answer: {answer}")
+
+        return {"output": answer}
+
+    @property
+    def input_keys(self):
+        return ["question", "schema"]
+
+    @property
+    def output_keys(self):
+        return ["output"]
