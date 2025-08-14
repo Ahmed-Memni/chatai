@@ -2,7 +2,7 @@ langchain==0.2.10
 langchain-google-genai==1.0.8
 langchain-experimental==0.0.64
 sqlalchemy==2.0.32
-psycopg2-binary==2.9.9
+
 google-generativeai==0.7.2
 python-dotenv==1.0.1
 matplotlib==3.9.2

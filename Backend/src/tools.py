@@ -1,6 +1,3 @@
-"""
-Tools for SQL execution, clarification, and graph generation.
-"""
 from langchain.tools import Tool
 from langchain_experimental.utilities import PythonREPL
 from src.chains import full_chain, sql_chain, graph_code_chain, run_query
@@ -11,17 +8,36 @@ import pandas as pd
 db = get_db()
 repl = PythonREPL()
 
-def run_full_chain(question):
-    """Execute SQL query and return natural language response."""
+def run_full_chain_tool(inputs):
+    """
+    Accept either a string or a dict with 'question' or 'input' keys.
+    Always passes {'question': ...} to full_chain.
+    Returns a plain string, never a dict.
+    """
+    # Normalize input
+    if isinstance(inputs, str):
+        question = inputs
+    elif isinstance(inputs, dict):
+        question = inputs.get("question") or inputs.get("input")
+    else:
+        return "Error: invalid input type"
+
+    if not question:
+        return "Error: no question provided"
+
     try:
-        return full_chain.invoke({"question": question})
+        result = full_chain.run({"question": question})
+        # Ensure output is a string
+        if isinstance(result, dict):
+            return result.get("output", str(result))
+        return str(result)
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error executing SQL: {str(e)}"
 
 sql_tool = Tool(
     name="sql_query",
-    func=run_full_chain,
-    description="Use this to answer database queries in natural language by generating and executing SQL."
+    func=run_full_chain_tool,
+    description="Execute SQL queries and return a plain text result."
 )
 
 def ask_clarification(query):
@@ -40,22 +56,34 @@ clarification_tool = Tool(
 
 def generate_and_execute_graph(inputs):
     """Generate and execute Matplotlib code for graphs."""
-    sql_query = sql_chain.invoke({"question": inputs["question"]})
-    sql_result = run_query(sql_query)
-    code = graph_code_chain.invoke({"question": inputs["question"], "sql_query": sql_query})
+    question = inputs if isinstance(inputs, str) else inputs.get("question", "")
+    if not question:
+        return "Error: no question provided for graph"
     try:
+        sql_query = sql_chain.invoke({"question": question})
+        sql_result = run_query(sql_query)
+        code = graph_code_chain.invoke({"question": question, "sql_query": sql_query})
         repl = PythonREPL(sandbox_globals={"plt": plt, "pd": pd})
         repl.run(code)
         fig = plt.gcf()
         plt.close()
         return fig
     except Exception as e:
-        return f"Failed to generate graph: {sql_result}"
+        return f"Failed to generate graph: {str(e)}"
 
 graph_tool = Tool(
     name="generate_graph",
     func=generate_and_execute_graph,
-    description="Use this to generate and execute Matplotlib code for graphs based on query and data."
+    description="Generate and execute Matplotlib code based on query and data."
 )
 
-tools = [sql_tool, clarification_tool, graph_tool]
+def parsing_fallback_tool(error_message):
+    """Return a friendly message when parsing fails."""
+    return f"Parsing failed, but here’s the last readable message: {error_message}"
+
+parsing_tool = Tool(
+    name="parsing_fallback",
+    func=parsing_fallback_tool,
+    description="Provide a readable fallback output when parsing fails."
+)
+tools = [sql_tool,graph_tool, clarification_tool, parsing_tool]

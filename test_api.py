@@ -11,7 +11,7 @@ Table sinistres: id (uuid), contrat_id (uuid), date_sinistre (date), description
 response = requests.post(
     "http://localhost:8000/test",
     json={
-        "user_input": "What are the names and emails of all clients?",
+        "user_input": "What are the emails of all clients?",
         "schema": schema
     }
 )
