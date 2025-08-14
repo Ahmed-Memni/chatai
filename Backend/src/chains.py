@@ -1,16 +1,11 @@
-"""
-Chains for SQL query generation, response formatting, and graph code generation.
-"""
-
 from functools import lru_cache
-from pydantic import PrivateAttr
-import psycopg
 import re
-from langchain.prompts import PromptTemplate, ChatPromptTemplate
-from langchain.chains.llm import LLMChain
+import psycopg
+from pydantic import PrivateAttr
+from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain.schema import BaseOutputParser
-
-from langchain_openai import OpenAI
+from langchain_core.runnables import RunnableSequence
+from langchain_openai import ChatOpenAI  # Use ChatOpenAI instead of OpenAI
 from src.database import get_db
 from src.config import LLM_MODEL, OPENROUTER_API_KEY, OPENROUTER_API_BASE
 
@@ -18,30 +13,23 @@ from src.config import LLM_MODEL, OPENROUTER_API_KEY, OPENROUTER_API_BASE
 # FinalAnswerParser
 # -------------------------------
 class FinalAnswerParser(BaseOutputParser):
-    """
-    Extracts a clean 'Final Answer' from LLM output.
-    Falls back to full text if no explicit 'Final Answer:' is found.
-    Strips Thoughts, Actions, markdown, and URLs.
-    """
+    """Extracts a clean 'Final Answer' from LLM output."""
     def parse(self, text: str) -> str:
-        # Remove URLs
         text = re.sub(r'https?://\S+', '', text)
-        # Remove markdown formatting
         text = re.sub(r'[*_`]', '', text)
-        # Remove lines starting with Thought: or Action:
-        lines = [line for line in text.splitlines() if not re.match(r'^\s*(Thought|Action)\s*:', line, re.IGNORECASE)]
+        lines = [
+            line for line in text.splitlines()
+            if not re.match(r'^\s*(Thought|Action)\s*:', line, re.IGNORECASE)
+        ]
         text = "\n".join(lines)
-        # Extract after 'Final Answer:'
         match = re.search(r'Final Answer\s*:\s*(.*)', text, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        return text.strip()
+        return match.group(1).strip() if match else text.strip()
 
 # -------------------------------
 # Initialize LLM and DB
 # -------------------------------
-llm = OpenAI(
-    model_name=LLM_MODEL,
+llm = ChatOpenAI(
+    model_name=LLM_MODEL,  # Should be set to "moonshot/kimi" or similar in src.config
     openai_api_key=OPENROUTER_API_KEY,
     openai_api_base=OPENROUTER_API_BASE,
     temperature=0,
@@ -88,67 +76,64 @@ sql_template = """Based on the table schema below, write a SQL query that would 
 Question: {question}
 SQL Query:"""
 sql_prompt = ChatPromptTemplate.from_template(sql_template)
-sql_chain = LLMChain(llm=llm, prompt=sql_prompt, output_parser=FinalAnswerParser())
 
 # -------------------------------
 # Response generation chain
 # -------------------------------
-response_template = """Based on the table schema, question, SQL query, and SQL response, write a clean natural language response.
+response_prompt = ChatPromptTemplate.from_messages([
+    SystemMessagePromptTemplate.from_template(
+        "You are a helpful assistant that converts SQL responses into clean natural language."
+    ),
+    HumanMessagePromptTemplate.from_template(
+        """Based on the table schema, question, SQL query, and SQL response, write a clean natural language response.
 Do NOT include tables, markdown, or extra formatting. Just list the data in plain text.
 
 {input}
 
 Final Answer:"""
+    )
+])
 
-response_prompt = PromptTemplate(
-    template=response_template,
-    input_variables=["input"]  # only one key
-)
-
-# Corrected response chain
-full_response_chain = LLMChain(
-    llm=llm,
-    prompt=response_prompt,       # prompt already defines input_variables=["input"]
-    output_key="response",
-    output_parser=FinalAnswerParser()
-)
-
+response_chain = RunnableSequence(response_prompt, llm, FinalAnswerParser())
 
 # -------------------------------
 # FullChain class
 # -------------------------------
-class FullChain(LLMChain):
-    _response_chain: LLMChain = PrivateAttr()
-
+class FullChain:
+    """Combines SQL generation, execution, and response formatting."""
     def __init__(self):
-        super().__init__(llm=llm, prompt=sql_prompt, output_key="query")
-        self._response_chain = full_response_chain
+        self.sql_prompt = sql_prompt
+        self.llm = llm
+        self._response_chain = response_chain
 
-    def _call(self, inputs: dict):
-        question = inputs.get("question")
+    def run(self, question: str):
         if not question:
             return {"output": "Error: no question provided"}
 
         schema = db.get_table_info()
-        formatted_prompt = sql_prompt.format_prompt(question=question, schema=schema)
-        query = super()._call({"input": str(formatted_prompt)})
-        response = run_query(query)
 
-        
-        combined_input = f"Schema: {schema}\nQuestion: {question}\nSQL Query: {query}\nSQL Response: {response}"
+        # Format prompt for ChatOpenAI
+        prompt_value = self.sql_prompt.format_prompt(
+            question=question,
+            schema=schema
+        )
 
+        # Generate SQL query using LLM
+        query_response = self.llm.invoke(prompt_value)
+        query = query_response.content.strip()  # Extract the content from ChatOpenAI response
 
-        answer = self._response_chain.run({"input": combined_input})  # only "input"
+        sql_response = run_query(query)
 
+        combined_input = (
+            f"Schema: {schema}\n"
+            f"Question: {question}\n"
+            f"SQL Query: {query}\n"
+            f"SQL Response: {sql_response}"
+        )
+
+        # Format final answer
+        answer = self._response_chain.invoke({"input": combined_input})
         return {"output": answer}
-
-    @property
-    def input_keys(self):
-        return ["question"]
-
-    @property
-    def output_keys(self):
-        return ["output"]
 
 full_chain = FullChain()
 
@@ -157,15 +142,15 @@ full_chain = FullChain()
 # -------------------------------
 graph_code_template = """Based on the user's question and SQL results, generate Python code using Matplotlib to create the best graph type.
 Include:
-- Imports (matplotlib.pyplot as plt, pandas as pd).
-- Use SQL results directly.
-- Save figure to buffer (no plt.show()).
-- Set titles, labels, and legend.
-- Optionally use seaborn as sns for enhanced visuals.
+- Imports (matplotlib.pyplot as plt, pandas as pd)
+- Use SQL results directly
+- Save figure to buffer (no plt.show())
+- Set titles, labels, and legend
+- Optionally use seaborn as sns
 
 Question: {question}
 SQL Results: {sql_results}
 
 Generated Code:"""
 graph_code_prompt = ChatPromptTemplate.from_template(graph_code_template)
-graph_code_chain = LLMChain(llm=llm, prompt=graph_code_prompt, output_parser=StrOutputParser())
+graph_code_chain = RunnableSequence(graph_code_prompt, llm, StrOutputParser())

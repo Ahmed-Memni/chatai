@@ -10,14 +10,14 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from src.tools import tools
 from src.chains import full_chain, graph_code_chain
 from langchain_openai import OpenAI
-from langchain_openai import OpenAI
+from langchain_openai import ChatOpenAI
 from src.config import OPENROUTER_API_KEY, OPENROUTER_API_BASE, LLM_MODEL
 
-llm = OpenAI(
+llm = ChatOpenAI(
     model_name=LLM_MODEL,
     openai_api_key=OPENROUTER_API_KEY,
     openai_api_base=OPENROUTER_API_BASE,
-    temperature=0.5,
+    temperature=0,
 )
 
 
